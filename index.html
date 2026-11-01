@@ -1,0 +1,273 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Tally Hunt - P2P</title>
+    <script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
+    <style>
+        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background: #f4f4f9; color: #333; text-align: center; margin: 0; padding: 20px; }
+        h1 { color: #2c3e50; }
+        .screen { display: none; max-width: 800px; margin: 0 auto; }
+        .active { display: block; }
+        
+        /* Lobby */
+        .lobby-box { background: white; padding: 30px; border-radius: 10px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); margin-bottom: 20px;}
+        input, button { padding: 10px 20px; font-size: 16px; margin: 5px; border-radius: 5px; border: 1px solid #ccc; }
+        button { background: #3498db; color: white; border: none; cursor: pointer; font-weight: bold; }
+        button:hover { background: #2980b9; }
+        #roomIdDisplay { font-size: 1.5em; font-weight: bold; color: #e74c3c; background: #fff; padding: 10px; border: 2px dashed #e74c3c; display: inline-block; margin: 10px;}
+
+        /* Game UI */
+        #status { font-size: 1.5em; margin: 20px 0; font-weight: bold; color: #2c3e50; min-height: 40px;}
+        
+        #board { display: grid; grid-template-columns: repeat(10, 1fr); gap: 5px; max-width: 600px; margin: 0 auto 30px auto; }
+        .num-cell { aspect-ratio: 1; background: #ecf0f1; display: flex; align-items: center; justify-content: center; cursor: pointer; font-weight: bold; font-size: 1.2em; border-radius: 5px; transition: 0.2s; border: 2px solid transparent;}
+        .num-cell:hover { background: #bdc3c7; }
+        .num-cell.target { background: #f1c40f; border-color: #f39c12; }
+        .num-cell.found { background: #2ecc71; color: white; border-color: #27ae60; cursor: default; }
+        .num-cell.disabled { cursor: default; opacity: 0.6; }
+
+        #tally-sheet { display: grid; grid-template-columns: repeat(10, 1fr); gap: 3px; max-width: 400px; margin: 0 auto; }
+        .tally-box { aspect-ratio: 1; background: white; border: 2px solid #bdc3c7; display: flex; align-items: center; justify-content: center; font-size: 1.5em; color: #e74c3c; font-weight: bold; border-radius: 3px; transition: 0.1s; }
+        .tally-box.clicked { background: #fadbd8; border-color: #e74c3c; transform: scale(0.95); }
+        
+        .role-badge { display: inline-block; padding: 5px 15px; border-radius: 20px; font-size: 0.9em; margin-bottom: 10px; font-weight: bold;}
+        .role-tally { background: #e74c3c; color: white; }
+        .role-seek { background: #2ecc71; color: white; }
+    </style>
+</head>
+<body>
+
+    <h1>🎯 Tally Hunt</h1>
+
+    <!-- LOBBY SCREEN -->
+    <div id="lobby-screen" class="screen active">
+        <div class="lobby-box">
+            <h2>Play with a friend!</h2>
+            <p>Player 1: Click "Create Room" and share the Room ID.</p>
+            <p>Player 2: Paste the Room ID and click "Join Room".</p>
+            <hr>
+            <button onclick="createRoom()">Create Room</button>
+            <div id="roomIdDisplay" style="display:none;"></div>
+            <hr>
+            <input type="text" id="joinInput" placeholder="Paste Room ID here">
+            <button onclick="joinRoom()">Join Room</button>
+        </div>
+        <p id="lobbyStatus" style="color: red;"></p>
+    </div>
+
+    <!-- GAME SCREEN -->
+    <div id="game-screen" class="screen">
+        <div id="roleBadge" class="role-badge"></div>
+        <div id="status">Connecting...</div>
+        
+        <h3>Number Board</h3>
+        <div id="board"></div>
+
+        <h3>My Tally Sheet (Click to draw X)</h3>
+        <div id="tally-sheet"></div>
+    </div>
+
+    <script>
+        let peer;
+        let conn;
+        let isHost = false;
+        let iAmSeeker = false; 
+        let isTallying = false;
+        let myTallyCount = 0;
+        let currentTarget = 0;
+        let board = [];
+        let gameActive = false;
+
+        // --- LOBBY LOGIC ---
+        function generateRoomId() {
+            return 'tally-' + Math.random().toString(36).substr(2, 5);
+        }
+
+        function createRoom() {
+            isHost = true;
+            const roomId = generateRoomId();
+            peer = new Peer(roomId);
+            
+            peer.on('open', (id) => {
+                document.getElementById('roomIdDisplay').innerText = id;
+                document.getElementById('roomIdDisplay').style.display = 'inline-block';
+                document.getElementById('lobbyStatus').innerText = "Waiting for opponent to join...";
+            });
+
+            peer.on('connection', (connection) => {
+                conn = connection;
+                setupConnection();
+                startGame();
+            });
+
+            peer.on('error', (err) => {
+                document.getElementById('lobbyStatus').innerText = "Error: " + err.type;
+            });
+        }
+
+        function joinRoom() {
+            const roomId = document.getElementById('joinInput').value.trim();
+            if (!roomId) return;
+            
+            peer = new Peer();
+            conn = peer.connect(roomId);
+            
+            conn.on('open', () => {
+                setupConnection();
+            });
+
+            peer.on('error', (err) => {
+                document.getElementById('lobbyStatus').innerText = "Could not connect. Check Room ID.";
+            });
+        }
+
+        function setupConnection() {
+            conn.on('data', handleData);
+            conn.on('close', () => {
+                alert("Opponent disconnected!");
+                location.reload();
+            });
+        }
+
+        // --- GAME LOGIC ---
+        function generateBoard() {
+            let nums = [];
+            for(let i=1; i<=100; i++) nums.push(i);
+            return nums.sort(() => Math.random() - 0.5);
+        }
+
+        function startGame() {
+            board = generateBoard();
+            iAmSeeker = false; // Host is Tally-er first
+            
+            // Send board to joiner
+            conn.send({ type: 'init', board: board, youAreSeeker: true });
+            
+            switchToGameScreen();
+            updateStatus();
+        }
+
+        function handleData(data) {
+            if (data.type === 'init') {
+                board = data.board;
+                iAmSeeker = data.youAreSeeker;
+                switchToGameScreen();
+                updateStatus();
+            } 
+            else if (data.type === 'target') {
+                currentTarget = data.num;
+                iAmSeeker = true;
+                isTallying = false;
+                updateStatus();
+                highlightTarget();
+            } 
+            else if (data.type === 'found') {
+                isTallying = false;
+                updateStatus();
+                // Swap roles
+                setTimeout(() => {
+                    iAmSeeker = !iAmSeeker;
+                    conn.send({ type: 'swap' });
+                    updateStatus();
+                }, 1000);
+            } 
+            else if (data.type === 'swap') {
+                iAmSeeker = !iAmSeeker;
+                updateStatus();
+            }
+            else if (data.type === 'gameOver') {
+                gameActive = false;
+                document.getElementById('status').innerText = "GAME OVER! " + (data.loser === 'me' ? "You filled your page first. You lose!" : "Opponent filled their page first. You win!");
+            }
+        }
+
+        function switchToGameScreen() {
+            document.getElementById('lobby-screen').classList.remove('active');
+            document.getElementById('game-screen').classList.add('active');
+            renderBoard();
+            renderTallySheet();
+        }
+
+        function updateStatus() {
+            const status = document.getElementById('status');
+            const badge = document.getElementById('roleBadge');
+            
+            if (iAmSeeker) {
+                badge.innerText = "ROLE: SEEKER";
+                badge.className = "role-badge role-seek";
+                if (currentTarget === 0) {
+                    status.innerText = "Wait for opponent to pick a number...";
+                } else {
+                    status.innerText = `FIND THE NUMBER: ${currentTarget}`;
+                }
+            } else {
+                badge.innerText = "ROLE: TALLY-ER";
+                badge.className = "role-badge role-tally";
+                status.innerText = "Pick a number on the board to challenge your opponent!";
+            }
+        }
+
+        function renderBoard() {
+            const boardDiv = document.getElementById('board');
+            boardDiv.innerHTML = '';
+            board.forEach((num, index) => {
+                let cell = document.createElement('div');
+                cell.className = 'num-cell';
+                cell.innerText = num;
+                cell.dataset.num = num;
+                cell.onclick = () => handleBoardClick(cell, num);
+                boardDiv.appendChild(cell);
+            });
+        }
+
+        function handleBoardClick(cell, num) {
+            if (!iAmSeeker && currentTarget === 0) {
+                // I am Tally-er, picking a target
+                currentTarget = num;
+                cell.classList.add('target');
+                conn.send({ type: 'target', num: num });
+                isTallying = true;
+                document.getElementById('status').innerText = `Challenged with ${num}! CLICK YOUR SHEET FAST!`;
+            } 
+            else if (iAmSeeker && num === currentTarget) {
+                // I am Seeker, found the target
+                cell.classList.add('found');
+                conn.send({ type: 'found' });
+                document.getElementById('status').innerText = "Found it! Waiting for next turn...";
+                currentTarget = 0; // Reset for next turn
+            }
+        }
+
+        function highlightTarget() {
+            const cells = document.querySelectorAll('.num-cell');
+            cells.forEach(c => c.classList.remove('target', 'found'));
+        }
+
+        function renderTallySheet() {
+            const tallyDiv = document.getElementById('tally-sheet');
+            tallyDiv.innerHTML = '';
+            for(let i=0; i<100; i++) {
+                let box = document.createElement('div');
+                box.className = 'tally-box';
+                box.onclick = () => {
+                    if (isTallying && !box.classList.contains('clicked')) {
+                        box.classList.add('clicked');
+                        box.innerText = 'X';
+                        myTallyCount++;
+                        
+                        if (myTallyCount >= 100) {
+                            isTallying = false;
+                            gameActive = false;
+                            conn.send({ type: 'gameOver', loser: 'me' });
+                            document.getElementById('status').innerText = "YOUR PAGE IS FULL! YOU LOSE!";
+                        }
+                    }
+                };
+                tallyDiv.appendChild(box);
+            }
+        }
+    </script>
+</body>
+</html>
